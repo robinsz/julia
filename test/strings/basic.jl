@@ -243,12 +243,12 @@ for T in [BigInt, Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64, Int1
     @test isnull(tryparse(T, "1\0"))
 end
 let s = normalize_string("tést",:NFKC)
-    @test unsafe_string(Base.unsafe_convert(Cstring, s)) == s
+    @test unsafe_string(Base.unsafe_convert(Cstring, Base.cconvert(Cstring, s))) == s
     @test unsafe_string(convert(Cstring, Symbol(s))) == s
     @test wstring(Base.unsafe_convert(Cwstring, wstring(s))) == s
 end
 let s = "ba\0d"
-    @test_throws ArgumentError Base.unsafe_convert(Cstring, s)
+    @test_throws ArgumentError Base.unsafe_convert(Cstring, Base.cconvert(Cstring, s))
     @test_throws ArgumentError Base.unsafe_convert(Cwstring, wstring(s))
 end
 
