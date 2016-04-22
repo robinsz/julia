@@ -10,9 +10,6 @@ import Base: @nref, @ncall, @nif, @nexprs, LinearFast, LinearSlow, to_index, Abs
 
 export CartesianIndex, CartesianRange
 
-# Traits for linear indexing
-linearindexing{A<:BitArray}(::Type{A}) = LinearFast()
-
 # CartesianIndex
 immutable CartesianIndex{N} <: AbstractCartesianIndex{N}
     I::NTuple{N,Int}
