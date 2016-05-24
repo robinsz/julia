@@ -475,3 +475,29 @@ end
 # the following segfaults with LLVM 3.8 on Windows, ref #15417
 @test collect(sub(sub(reshape(1:13^3, 13, 13, 13), 3:7, 6, :), 1:2:5, :, 1:2:5)) ==
     cat(3,[68,70,72],[406,408,410],[744,746,748])
+
+
+
+# tests @sub (and replace_ref_end!)
+X = reshape(1:24,2,3,4)
+Y = 4:-1:1
+
+@test isa(@sub(X[1:3]), SubArray)
+
+
+@test X[1:end] == @sub X[1:end]
+@test X[1:end-3] == @sub X[1:end-3]
+@test X[1:end,2,2] == @sub X[1:end,2,2]
+@test X[1,1:end-2] == @sub X[1,1:end-2]
+@test X[1,2,1:end-2] == @sub X[1,2,1:end-2]
+@test X[1,2,Y[2:end]] == @sub X[1,2,Y[2:end]]
+@test X[1:end,2,Y[2:end]] == @sub X[1:end,2,Y[2:end]]
+
+u = (1,2:3)
+@test X[u...,2:end] == @sub X[u...,2:end]
+@test X[(1,)...,(2,)...,2:end] == @sub X[(1,)...,(2,)...,2:end]
+
+# test macro hygiene
+let size=(x,y)-> error("should not happen")
+    @test X[1:end,2,2] == @sub X[1:end,2,2]
+end
