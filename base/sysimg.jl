@@ -126,6 +126,7 @@ include("iobuffer.jl")
 
 # strings & printing
 include("char.jl")
+include("intfuncs.jl")
 include("string.jl")
 include("unicode.jl")
 include("parse.jl")
@@ -141,7 +142,6 @@ using .Libc: getpid, gethostname, time
 include("libdl.jl")
 using .Libdl: DL_LOAD_PATH
 include("env.jl")
-include("intfuncs.jl")
 
 # nullable types
 include("nullable.jl")

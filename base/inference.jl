@@ -978,9 +978,9 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
     elseif is(f,Core.kwfunc)
         if length(fargs) == 2
             ft = widenconst(argtypes[2])
-            if isa(ft,DataType) && !ft.abstract
+            if isa(ft,DataType) && (!ft.abstract || ft.name.mt === Type.name.mt)
                 if isdefined(ft.name.mt, :kwsorter)
-                    return typeof(ft.name.mt.kwsorter)
+                    return Const(ft.name.mt.kwsorter)
                 end
             end
         end
@@ -1018,7 +1018,7 @@ function abstract_call(f::ANY, fargs, argtypes::Vector{Any}, vtypes::VarTable, s
     return abstract_call_gf_by_type(f, atype, sv)
 end
 
-function abstract_eval_call(e, vtypes::VarTable, sv::InferenceState)
+function abstract_eval_call(e::Expr, vtypes::VarTable, sv::InferenceState)
     argtypes = Any[abstract_eval(a, vtypes, sv) for a in e.args]
     #print("call ", e.args[1], argtypes, "\n\n")
     for x in argtypes
@@ -2309,9 +2309,10 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     end
     # special-case inliners for known pure functions that compute types
     if isType(e.typ) && !has_typevars(e.typ.parameters[1],true)
-        if (is(f,apply_type) || is(f,fieldtype) || is(f,typeof) ||
+        if (is(f, apply_type) || is(f, fieldtype) || is(f, typeof) ||
             istopfunction(topmod, f, :typejoin) ||
             istopfunction(topmod, f, :promote_type))
+            # XXX: compute effect_free for the actual arguments
             if effect_free(argexprs[2], sv, true)
                 return (e.typ.parameters[1],())
             else
@@ -2319,13 +2320,23 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
             end
         end
     end
-    if isa(f,IntrinsicFunction) || ft ⊑ IntrinsicFunction
+    if is(f, Core.kwfunc) && length(argexprs) == 2 && isa(e.typ, Const)
+        if effect_free(argexprs[2], sv, true)
+            return (e.typ.val, ())
+        else
+            return (e.typ.val, Any[argexprs[2]])
+        end
+    end
+    if isa(f, IntrinsicFunction) || ft ⊑ IntrinsicFunction ||
+            isa(f, Builtin) || ft ⊑ Builtin
         return NF
     end
 
-    atype = argtypes_to_type(atypes)
-    if length(atype.parameters) - 1 > MAX_TUPLETYPE_LEN
-        atype = limit_tuple_type(atype)
+    atype_unlimited = argtypes_to_type(atypes)
+    if length(atype_unlimited.parameters) - 1 > MAX_TUPLETYPE_LEN
+        atype = limit_tuple_type(atype_unlimited)
+    else
+        atype = atype_unlimited
     end
     meth = _methods_by_ftype(atype, 1)
     if meth === false || length(meth) != 1
@@ -2394,10 +2405,10 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     # end
 
     (linfo, ty, inferred) = typeinf(method, metharg, methsp, true)
-    if is(linfo,nothing) || !inferred
+    if linfo === nothing
         return NF
     end
-    if !linfo.inlineable
+    if !inferred || !linfo.inlineable
         # TODO
         #=
         if incompletematch
@@ -2423,6 +2434,13 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
             return NF
         end
         =#
+
+        # convert call to invoke
+        cache_linfo = ccall(:jl_get_spec_lambda, Any, (Any,), atype) # TODO: merge tfunc and spec arrays so this lookup unnecessary
+        if cache_linfo !== nothing
+            e.head = :invoke
+            unshift!(e.args, cache_linfo)
+        end
         return NF
     end
 
