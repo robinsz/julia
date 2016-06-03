@@ -37,6 +37,13 @@ Language changes
     Instead of adding methods to `call`, methods are added by type using the syntax
     `(::ftype)(...) = ...`. `call` is deprecated ([#13412]).
 
+  * The type of array returned by a comprehension now depends only on the types of
+    the computed elements.
+    Previously, type inference was used to determine the result type ([#7258]).
+
+  * Comprehensions preserve the shape of their iteration space. For example,
+    `[ 2x for x in A ]` will have the same shape as array `A`.
+
   * `using` and `import` are now case-sensitive even on case-insensitive filesystems (common on Mac and Windows) ([#13542]).
 
   * Relational symbols are now allowed as infix operators ([#8036]).
