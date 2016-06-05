@@ -1663,7 +1663,7 @@ void register_eh_frames(uint8_t *Addr, size_t Size)
             if (start < start_ip)
                 start_ip = start;
             if (end_ip < (start + size))
-                end_ip = start+size;
+                end_ip = start + size;
             table[cur_entry].fde_offset =
                 safe_trunc<int32_t>((intptr_t)Entry - (intptr_t)Addr);
             start_ips[cur_entry] = start;
