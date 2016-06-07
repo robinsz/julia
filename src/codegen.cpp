@@ -1014,6 +1014,7 @@ uint64_t jl_get_llvm_fptr(llvm::Function *llvmf)
 // and forces compilation of the lambda info
 extern "C" void jl_generate_fptr(jl_lambda_info_t *li)
 {
+    if (li->jlcall_api == 2) return;
     JL_LOCK(&codegen_lock);
     // objective: assign li->fptr
     assert(li->functionObjectsDecls.functionObject);
@@ -1030,7 +1031,13 @@ extern "C" void jl_generate_fptr(jl_lambda_info_t *li)
 // or generate object code for it
 extern "C" void jl_compile_linfo(jl_lambda_info_t *li)
 {
-    if (li->functionObjectsDecls.functionObject == NULL) {
+    if (li->jlcall_api == 2) {
+        // delete code for functions reduced to a constant
+        li->code = jl_nothing;
+        li->slottypes = jl_nothing;
+        li->ssavaluetypes = jl_nothing;
+    }
+    else if (li->functionObjectsDecls.functionObject == NULL) {
         // objective: assign li->functionObject
         to_function(li);
     }
@@ -1128,6 +1135,15 @@ void *jl_get_llvmf(jl_tupletype_t *tt, bool getwrapper, bool getdeclarations)
         return NULL;
     }
 
+    if (linfo->code == jl_nothing) {
+        // re-infer if we've deleted the code
+        jl_type_infer(linfo, 0);
+        if (linfo->code == jl_nothing) {
+            JL_GC_POP();
+            return NULL;
+        }
+    }
+
     if (!getdeclarations) {
         // emit this function into a new module
         Function *f, *specf;
@@ -1165,7 +1181,17 @@ void *jl_get_llvmf(jl_tupletype_t *tt, bool getwrapper, bool getdeclarations)
             return specf;
         }
     }
-    jl_compile_linfo(linfo);
+    if (linfo->jlcall_api == 2) {
+        // normally we don't generate native code for these functions, so need an exception here
+        if (linfo->functionObjectsDecls.functionObject == NULL)
+            to_function(linfo);
+        linfo->code = jl_nothing;
+        linfo->slottypes = jl_nothing;
+        linfo->ssavaluetypes = jl_nothing;
+    }
+    else {
+        jl_compile_linfo(linfo);
+    }
     Function *llvmf;
     if (!getwrapper && linfo->functionObjectsDecls.specFunctionObject != NULL) {
         llvmf = (Function*)linfo->functionObjectsDecls.specFunctionObject;
@@ -2746,6 +2772,12 @@ static jl_cgval_t emit_call(jl_expr_t *ex, jl_codectx_t *ctx)
               }*/
             jl_lambda_info_t *li = jl_get_specialization1((jl_tupletype_t*)aty);
             if (li != NULL) {
+                if (li->jlcall_api == 2) {
+                    assert(li->constval);
+                    result = mark_julia_const(li->constval);
+                    JL_GC_POP();
+                    return result;
+                }
                 assert(li->functionObjectsDecls.functionObject != NULL);
                 theFptr = (Value*)li->functionObjectsDecls.functionObject;
                 jl_cgval_t fval;
@@ -3524,7 +3556,7 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
             // may throw.
             jl_printf(JL_STDERR, "WARNING: cfunction: return type of %s does not match", name);
         }
-        if (!lam->functionObjectsDecls.functionObject) {
+        if (!lam->functionObjectsDecls.functionObject && lam->jlcall_api != 2) {
             jl_errorf("ERROR: cfunction: compiling %s failed", name);
         }
     }
@@ -3598,6 +3630,13 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
         }
         myargs = NULL;
     }
+    else if (lam->jlcall_api == 2) {
+        nargs = 0; // arguments not needed
+        specsig = false;
+        jlfunc_sret = false;
+        myargs = NULL;
+        theFptr = NULL;
+    }
     else {
         theFptr = (Function*)lam->functionObjectsDecls.functionObject;
         specsig = false;
@@ -3607,7 +3646,6 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
             "",
             /*InsertBefore*/ctx.ptlsStates);
     }
-    assert(theFptr);
 
     // first emit the arguments
     for (size_t i = 0; i < nargs; i++) {
@@ -3711,6 +3749,7 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
     // Create the call
     jl_cgval_t retval;
     if (lam == NULL) {
+        assert(theFptr);
         assert(nargs >= 0);
 #ifdef LLVM37
         Value *ret = builder.CreateCall(prepare_call(theFptr), {myargs,
@@ -3722,13 +3761,18 @@ static Function *gen_cfun_wrapper(jl_function_t *ff, jl_value_t *jlrettype, jl_t
         retval = mark_julia_type(ret, true, astrt, &ctx);
     }
     else if (specsig) {
+        assert(theFptr);
         bool retboxed;
         CallInst *call = builder.CreateCall(prepare_call(theFptr), ArrayRef<Value*>(args));
         call->setAttributes(theFptr->getAttributes());
         (void)julia_type_to_llvm(astrt, &retboxed);
         retval = mark_julia_type(jlfunc_sret ? (Value*)builder.CreateLoad(result) : (Value*)call, retboxed, astrt, &ctx);
     }
+    else if (lam->jlcall_api == 2) {
+        retval = mark_julia_const(lam->constval);
+    }
     else {
+        assert(theFptr);
         assert(nargs >= 0);
         // for jlcall, we need to pass the function object even if it is a ghost.
         // here we reconstruct the function instance from its type (first elt of argt)
@@ -3958,7 +4002,7 @@ static std::unique_ptr<Module> emit_function(jl_lambda_info_t *lam, jl_llvm_func
     assert(declarations && "Capturing declarations is always required");
 
     // step 1. unpack AST and allocate codegen context for this function
-    jl_array_t *code = lam->code;
+    jl_array_t *code = (jl_array_t*)lam->code;
     JL_GC_PUSH1(&code);
     if (!jl_typeis(code,jl_array_any_type))
         code = jl_uncompress_ast(lam, code);

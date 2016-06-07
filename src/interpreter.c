@@ -516,7 +516,7 @@ static jl_value_t *eval_body(jl_array_t *stmts, jl_value_t **locals, jl_lambda_i
 
 jl_value_t *jl_interpret_toplevel_thunk(jl_lambda_info_t *lam)
 {
-    jl_array_t *stmts = lam->code;
+    jl_array_t *stmts = (jl_array_t*)lam->code;
     jl_value_t **locals;
     JL_GC_PUSHARGS(locals, jl_linfo_nslots(lam) + jl_linfo_nssavalues(lam));
     jl_value_t *r = eval_body(stmts, locals, lam, 0, 1);

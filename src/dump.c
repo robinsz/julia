@@ -470,7 +470,7 @@ static int jl_prune_tcache(jl_typemap_entry_t *ml, void *closure)
     if (!jl_is_leaf_type((jl_value_t*)ml->sig)) {
         jl_value_t *ret = ml->func.value;
         if (jl_is_lambda_info(ret)) {
-            jl_array_t *code = ((jl_lambda_info_t*)ret)->code;
+            jl_value_t *code = ((jl_lambda_info_t*)ret)->code;
             if (jl_is_array(code) && jl_array_len(code) > 500) {
                 ml->func.value = ((jl_lambda_info_t*)ret)->rettype;
                 jl_gc_wb(ml, ml->func.value);
@@ -868,7 +868,10 @@ static void jl_serialize_value_(ios_t *s, jl_value_t *v)
     else if (jl_is_lambda_info(v)) {
         writetag(s, jl_lambda_info_type);
         jl_lambda_info_t *li = (jl_lambda_info_t*)v;
-        jl_serialize_value(s, li->code);
+        if (li->jlcall_api == 2)
+            jl_serialize_value(s, jl_nothing);
+        else
+            jl_serialize_value(s, li->code);
         jl_serialize_value(s, li->slotnames);
         jl_serialize_value(s, li->slottypes);
         jl_serialize_value(s, li->slotflags);
@@ -884,12 +887,12 @@ static void jl_serialize_value_(ios_t *s, jl_value_t *v)
         write_int8(s, li->isva);
         write_int32(s, li->nargs);
         jl_serialize_value(s, (jl_value_t*)li->def);
+        jl_serialize_value(s, li->constval);
         jl_serialize_fptr(s, li->fptr);
         // save functionObject pointers
         write_int32(s, li->functionID);
         write_int32(s, li->specFunctionID);
-        if (li->functionID)
-            write_int8(s, li->jlcall_api);
+        write_int8(s, li->jlcall_api);
     }
     else if (jl_typeis(v, jl_module_type)) {
         jl_serialize_module(s, (jl_module_t*)v);
@@ -1486,7 +1489,7 @@ static jl_value_t *jl_deserialize_value_(ios_t *s, jl_value_t *vtag, jl_value_t 
                                       NWORDS(sizeof(jl_lambda_info_t)));
         if (usetable)
             arraylist_push(&backref_list, li);
-        li->code = (jl_array_t*)jl_deserialize_value(s, (jl_value_t**)&li->code); jl_gc_wb(li, li->code);
+        li->code = jl_deserialize_value(s, &li->code); jl_gc_wb(li, li->code);
         li->slotnames = (jl_array_t*)jl_deserialize_value(s, (jl_value_t**)&li->slotnames); jl_gc_wb(li, li->slotnames);
         li->slottypes = jl_deserialize_value(s, &li->slottypes); jl_gc_wb(li, li->slottypes);
         li->slotflags = (jl_array_t*)jl_deserialize_value(s, (jl_value_t**)&li->slotflags); jl_gc_wb(li, li->slotflags);
@@ -1508,6 +1511,8 @@ static jl_value_t *jl_deserialize_value_(ios_t *s, jl_value_t *vtag, jl_value_t 
         li->nargs = read_int32(s);
         li->def = (jl_method_t*)jl_deserialize_value(s, (jl_value_t**)&li->def);
         if (li->def) jl_gc_wb(li, li->def);
+        li->constval = jl_deserialize_value(s, &li->constval);
+        if (li->constval) jl_gc_wb(li, li->constval);
         li->fptr = NULL;
         li->functionObjectsDecls.functionObject = NULL;
         li->functionObjectsDecls.specFunctionObject = NULL;
@@ -1520,7 +1525,7 @@ static jl_value_t *jl_deserialize_value_(ios_t *s, jl_value_t *vtag, jl_value_t 
         func_llvm = read_int32(s);
         cfunc_llvm = read_int32(s);
         jl_delayed_fptrs(li, func_llvm, cfunc_llvm);
-        li->jlcall_api = func_llvm ? read_int8(s) : 0;
+        li->jlcall_api = read_int8(s);
         li->compile_traced = 0;
         return (jl_value_t*)li;
     }
@@ -2086,6 +2091,7 @@ JL_DLLEXPORT jl_array_t *jl_compress_ast(jl_lambda_info_t *li, jl_array_t *ast)
 {
     JL_LOCK(&dump_lock); // Might GC
     assert(jl_is_lambda_info(li));
+    assert(jl_is_array(ast));
     DUMP_MODES last_mode = mode;
     mode = MODE_AST;
     ios_t dest;

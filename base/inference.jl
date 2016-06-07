@@ -1436,7 +1436,11 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
             end
         elseif isa(code,LambdaInfo)
             @assert code.inferred
-            return (code, code.rettype, true)
+            if needtree && code.code === nothing
+                # has been inferred before but code was deleted. re-run.
+            else
+                return (code, code.rettype, true)
+            end
         else
             # otherwise this is an InferenceState from a different bootstrap stage's
             # copy of the inference code; ignore it.
@@ -1444,7 +1448,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
     end
 
     if frame === nothing
-        if caller === nothing && needtree && in_typeinf_loop
+        if caller === nothing && in_typeinf_loop
             # if the caller needed the ast, but we are already in the typeinf loop
             # then just return early -- we can't fulfill this request
             # if the client was inlining, then this means we decided not to try to infer this
@@ -1473,7 +1477,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
             end
         end
         # add lam to be inferred and record the edge
-        if isa(caller, LambdaInfo)
+        if isa(caller, LambdaInfo) && caller.code !== nothing
             linfo = caller
         elseif method.isstaged
             if !isleaftype(atypes)
@@ -1515,7 +1519,7 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
         end
     end
     typeinf_loop(frame)
-    return (frame.linfo, frame.bestguess, frame.inferred)
+    return (frame.linfo, widenconst(frame.bestguess), frame.inferred)
 end
 
 function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, caller)
@@ -1546,6 +1550,10 @@ function typeinf_ext(linfo::LambdaInfo)
                 linfo.ssavaluetypes = code.ssavaluetypes
                 linfo.rettype = code.rettype
                 linfo.pure = code.pure
+                if code.jlcall_api == 2
+                    linfo.constval = code.constval
+                    linfo.jlcall_api = 2
+                end
             end
         end
     else
@@ -1717,7 +1725,7 @@ function typeinf_frame(frame)
                     rt = abstract_eval(stmt.args[1], s[pc], frame)
                     if tchanged(rt, frame.bestguess)
                         # new (wider) return type for frame
-                        frame.bestguess = widenconst(tmerge(frame.bestguess, rt))
+                        frame.bestguess = tmerge(frame.bestguess, rt)
                         for (caller, callerW) in frame.backedges
                             # notify backedges of updated type information
                             for caller_pc in callerW
@@ -1916,11 +1924,36 @@ function finish(me::InferenceState)
     end
     widen_all_consts!(me.linfo)
 
+    if (isa(me.bestguess,Const) && me.bestguess.val !== nothing) ||
+        (isType(me.bestguess) && !has_typevars(me.bestguess.parameters[1],true))
+        if !ispure && length(me.linfo.code) < 10
+            ispure = true
+            for stmt in me.linfo.code
+                if !statement_effect_free(stmt, me)
+                    ispure = false; break
+                end
+            end
+            if ispure
+                for fl in me.linfo.slotflags
+                    if (fl & Slot_UsedUndef) != 0
+                        ispure = false; break
+                    end
+                end
+            end
+        end
+        if ispure
+            # use constant calling convention
+            setfield!(me.linfo, :constval,
+                      isa(me.bestguess,Const) ? me.bestguess.val : me.bestguess.parameters[1])
+            me.linfo.jlcall_api = 2
+        end
+    end
+
     # finalize and record the linfo result
     me.inferred = true
 
     # determine and cache inlineability
-    me.linfo.inlineable = isinlineable(me.linfo)
+    me.linfo.inlineable = me.linfo.jlcall_api==2 || isinlineable(me.linfo)
 
     me.linfo.inferred = true
     me.linfo.inInference = false
@@ -1930,7 +1963,7 @@ function finish(me::InferenceState)
         compressedtree = ccall(:jl_compress_ast, Any, (Any,Any), me.linfo, me.linfo.code)
         me.linfo.code = compressedtree
     end
-    me.linfo.rettype = me.bestguess
+    me.linfo.rettype = widenconst(me.bestguess)
 
     if me.destination !== me.linfo
         out = me.destination
@@ -1944,6 +1977,10 @@ function finish(me::InferenceState)
         out.rettype = me.linfo.rettype
         out.pure = me.linfo.pure
         out.inlineable = me.linfo.inlineable
+        if me.linfo.jlcall_api == 2
+            out.constval = me.linfo.constval
+            out.jlcall_api = 2
+        end
     end
     if me.tfunc_bp !== nothing
         me.tfunc_bp.func = me.linfo
@@ -2197,34 +2234,33 @@ function is_pure_builtin(f::ANY)
     return false
 end
 
+function statement_effect_free(e::ANY, sv)
+    if isa(e,Expr) && e.head === :(=)
+        return !isa(e.args[1],GlobalRef) && effect_free(e.args[2], sv, false)
+    end
+    return effect_free(e, sv, false)
+end
+
 # detect some important side-effect-free calls (allow_volatile=true)
 # and some affect-free calls (allow_volatile=false) -- affect_free means the call
 # cannot be affected by previous calls, except assignment nodes
 function effect_free(e::ANY, sv, allow_volatile::Bool)
-    if isa(e,Slot)
-        return true
-    end
-    if isa(e,Symbol)
-        return allow_volatile
-    end
-    if isa(e,Number) || isa(e,AbstractString) || isa(e,SSAValue) ||
-        isa(e,QuoteNode) || isa(e,Type) || isa(e,Tuple)
-        return true
-    end
     if isa(e,GlobalRef)
-        return (isdefined(e.mod, e.name) &&
-                (allow_volatile || isconst(e.mod, e.name)))
-    end
-    if isa(e,Expr)
+        return (isdefined(e.mod, e.name) && (allow_volatile || isconst(e.mod, e.name)))
+    elseif isa(e,Symbol)
+        return allow_volatile
+    elseif isa(e,Expr)
         e = e::Expr
-        if e.head === :static_typeof
+        head = e.head
+        if head === :static_typeof
             return true
         end
-        if e.head === :static_parameter
+        if head === :static_parameter || head === :meta || head === :line || head === :gotoifnot ||
+            head === :inbounds || head === :boundscheck
             return true
         end
         ea = e.args
-        if e.head === :call && !isa(e.args[1], SSAValue) && !isa(e.args[1], Slot)
+        if head === :call && !isa(e.args[1], SSAValue) && !isa(e.args[1], Slot)
             if is_known_call_p(e, is_pure_builtin, sv)
                 if !allow_volatile
                     if is_known_call(e, arrayref, sv) || is_known_call(e, arraylen, sv)
@@ -2257,7 +2293,7 @@ function effect_free(e::ANY, sv, allow_volatile::Bool)
             else
                 return false
             end
-        elseif e.head === :new
+        elseif head === :new
             if !allow_volatile
                 a = ea[1]
                 typ = widenconst(exprtype(a,sv))
@@ -2266,8 +2302,10 @@ function effect_free(e::ANY, sv, allow_volatile::Bool)
                 end
             end
             # fall-through
-        elseif e.head === :return
+        elseif head === :return
             # fall-through
+        elseif head === :the_exception
+            return allow_volatile
         else
             return false
         end
@@ -2276,13 +2314,24 @@ function effect_free(e::ANY, sv, allow_volatile::Bool)
                 return false
             end
         end
-        return true
     end
-    return false
+    return true
 end
 
 
 #### post-inference optimizations ####
+
+function inline_as_constant(val::ANY, argexprs, sv)
+    # check if any arguments aren't effect_free and need to be kept around
+    stmts = Any[]
+    for i = 1:length(argexprs)
+        arg = argexprs[i]
+        if !effect_free(arg, sv, false)
+            push!(stmts, arg)
+        end
+    end
+    return (QuoteNode(val), stmts)
+end
 
 # inline functions whose bodies are "inline_worthy"
 # where the function body doesn't contain any argument more than once.
@@ -2341,22 +2390,13 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     method = meth[3]::Method
     # check whether call can be inlined to just a quoted constant value
     if isa(f, widenconst(ft)) && !method.isstaged && method.lambda_template.pure && (isType(e.typ) || isa(e.typ,Const))
-        # check if any arguments aren't effect_free and need to be kept around
-        stmts = Any[]
-        for i = 1:length(argexprs)
-            arg = argexprs[i]
-            if !effect_free(arg, sv, false)
-                push!(stmts, arg)
-            end
-        end
-
         if isType(e.typ)
             if !has_typevars(e.typ.parameters[1])
-                return (QuoteNode(e.typ.parameters[1]), stmts)
+                return inline_as_constant(e.typ.parameters[1], argexprs, sv)
             end
         else
             assert(isa(e.typ,Const))
-            return (QuoteNode(e.typ.val), stmts)
+            return inline_as_constant(e.typ.val, argexprs, sv)
         end
     end
 
@@ -2397,11 +2437,12 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
     #     end
     # end
 
-    (linfo, ty, inferred) = typeinf(method, metharg, methsp, true)
-    if is(linfo,nothing) || !inferred
-        return NF
-    end
-    if !linfo.inlineable
+    (linfo, ty, inferred) = typeinf(method, metharg, methsp, false)
+    inferred || return NF
+    if linfo !== nothing && linfo.jlcall_api == 2
+        # in this case function can be inlined to a constant
+        return inline_as_constant(linfo.constval, argexprs, sv)
+    elseif linfo !== nothing && !linfo.inlineable
         # TODO
         #=
         if incompletematch
@@ -2427,6 +2468,11 @@ function inlineable(f::ANY, ft::ANY, e::Expr, atypes::Vector{Any}, sv::Inference
             return NF
         end
         =#
+        return NF
+    elseif linfo === nothing || linfo.code === nothing
+        (linfo, ty, inferred) = typeinf(method, metharg, methsp, true)
+    end
+    if linfo === nothing || !inferred || !linfo.inlineable
         return NF
     end
 
