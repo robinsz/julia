@@ -463,6 +463,8 @@ end
 @deprecate String(p::Union{Ptr{Int8},Ptr{UInt8}}) unsafe_string(p)
 @deprecate String(p::Union{Ptr{Int8},Ptr{UInt8}}, len::Integer) unsafe_string(p,len)
 
+@deprecate convert(::Type{String}, a::Vector{UInt8}, invalids_as::AbstractString) convert(String, a)
+
 @deprecate ==(x::Char, y::Integer) UInt32(x) == y
 @deprecate ==(x::Integer, y::Char) x == UInt32(y)
 @deprecate isless(x::Char, y::Integer) UInt32(x) < y
