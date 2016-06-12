@@ -112,7 +112,35 @@ function srand(r::MersenneTwister, seed::Vector{UInt32})
 end
 
 # MersenneTwister jump
-function randjump(mt::MersenneTwister, jumps::Integer, jumppoly::AbstractString)
+
+"""
+    randjump(r::MersenneTwister, jumps, steps=10^20) -> Vector{MersenneTwister}
+
+Create an array of size `jumps` of initialized `MersenneTwister` RNG
+objects corresponding to different substreams of `r`, using the
+"jump-ahead" method. The first element of this array is the RNG `r`
+given as a parameter; each other RNG element is initialized to a state
+equivalent to what would be that of the previous element if it was
+moved forward by `steps` steps (one such "step" corresponds to the
+generation of two `Float64` numbers, but no numbers are actually
+generated). This allows obtaining multiple streams of random numbers
+from one initial state, while still benefiting from strong
+statistical properties (provided of course that the substreams don't
+overlap).
+"""
+randjump(r::MersenneTwister, jumps::Integer, steps::Integer=big(10)^20) =
+    randjump(r, jumps, dSFMT.calc_jump(steps))
+
+"""
+    randjump(r::MersenneTwister, jumps, jumppoly::AbstractString) -> Vector{MersenneTwister}
+
+Similar to `randjump(r, jumps, steps)` where the number of steps is determined
+by a jump polynomial `jumppoly` in ``GF(2)[X]`` encoded as an hexadecimal string.
+"""
+randjump(mt::MersenneTwister, jumps::Integer, jumppoly::AbstractString) =
+    randjump(mt, jumps, dSFMT.GF2X(jumppoly))
+
+function randjump(mt::MersenneTwister, jumps::Integer, jumppoly::dSFMT.GF2X)
     mts = MersenneTwister[]
     push!(mts, mt)
     for i in 1:jumps-1
@@ -121,7 +149,7 @@ function randjump(mt::MersenneTwister, jumps::Integer, jumppoly::AbstractString)
     end
     return mts
 end
-randjump(r::MersenneTwister, jumps::Integer) = randjump(r, jumps, dSFMT.JPOLY1e21)
+
 
 ## initialization
 
