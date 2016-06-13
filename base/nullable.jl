@@ -47,11 +47,11 @@ end
 
 get(x::Nullable) = x.isnull ? throw(NullException()) : x.value
 
-@inline function get{T}(x::Nullable{T}, y)
-    if isbits(T)
-        ifelse(x.isnull, convert(T, y), x.value)
+@inline function get{S,T}(x::Nullable{S}, y::T)
+    if isbits(S) && isbits(T)
+        ifelse(x.isnull, convert(promote_type(S, T), y), x.value)
     else
-        x.isnull ? convert(T, y) : x.value
+        x.isnull ? convert(promote_type(S, T), y) : x.value
     end
 end
 
