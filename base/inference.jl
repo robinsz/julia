@@ -47,7 +47,6 @@ type InferenceState
 
     # info on the state of inference and the linfo
     linfo::LambdaInfo
-    destination::LambdaInfo   # results need to be copied here when we finish
     nargs::Int
     stmt_types::Vector{Any}
     # return type
@@ -73,7 +72,6 @@ type InferenceState
     inworkq::Bool
     optimize::Bool
     inferred::Bool
-    tfunc_bp::Union{TypeMapEntry, Void}
 
     function InferenceState(linfo::LambdaInfo, atypes::ANY, sparams::SimpleVector, optimize::Bool)
         @assert isa(linfo.code,Array{Any,1})
@@ -157,12 +155,12 @@ type InferenceState
         inmodule = isdefined(linfo, :def) ? linfo.def.module : current_module() # toplevel thunks are inferred in the current module
         frame = new(
             sp, nl, Dict{SSAValue, Bool}(), inmodule, 0, false,
-            linfo, linfo, la, s, Union{}, W, n,
+            linfo, la, s, Union{}, W, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), #Dict{InferenceState, Vector{LineNum}}(),
             Vector{Tuple{InferenceState, Vector{LineNum}}}(),
-            false, false, false, optimize, false, nothing)
+            false, false, false, optimize, false)
         push!(active, frame)
         nactive[] += 1
         return frame
@@ -1385,8 +1383,16 @@ function newvar!(sv::InferenceState, typ)
 end
 
 # create a specialized LambdaInfo from a method
-function specialize_method(method::Method, types::ANY, sp::SimpleVector)
+function specialize_method(method::Method, types::ANY, sp::SimpleVector, insert)
     li = ccall(:jl_get_specialized, Ref{LambdaInfo}, (Any, Any, Any), method, types, sp)
+    if insert
+        l = ccall(:jl_specializations_lookup, Any, (Any, Any), method, types)
+        if isa(l,LambdaInfo)
+            return l
+        else
+            ccall(:jl_specializations_insert, Ref{TypeMapEntry}, (Any, Any, Any), method, types, li)
+        end
+    end
     return li
 end
 
@@ -1412,9 +1418,11 @@ end
 function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtree::Bool, optimize::Bool, cached::Bool, caller)
     local code = nothing
     local frame = nothing
-    # check cached specializations
-    # for an existing result stored there
-    if cached
+    if isa(caller, LambdaInfo)
+        code = caller
+    elseif cached
+        # check cached specializations
+        # for an existing result stored there
         if !is(method.specializations, nothing)
             code = ccall(:jl_specializations_lookup, Any, (Any, Any), method, atypes)
             if isa(code, Void)
@@ -1447,10 +1455,6 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
                 end
             end
         end
-    end
-
-    if isa(caller, LambdaInfo)
-        code = caller
     end
 
     if frame === nothing
@@ -1499,18 +1503,15 @@ function typeinf_edge(method::Method, atypes::ANY, sparams::SimpleVector, needtr
             end
             try
                 # user code might throw errors – ignore them
-                linfo = specialize_method(method, atypes, sparams)
+                linfo = specialize_method(method, atypes, sparams, cached)
             catch
                 return (nothing, Any, false)
             end
         else
-            linfo = specialize_method(method, atypes, sparams)
+            linfo = specialize_method(method, atypes, sparams, cached)
         end
         # our stack frame inference context
         frame = InferenceState(unshare_linfo!(linfo::LambdaInfo), atypes, sparams, optimize)
-        if cached
-            frame.tfunc_bp = ccall(:jl_specializations_insert, Ref{TypeMapEntry}, (Any, Any, Any), method, atypes, linfo)
-        end
     end
     frame = frame::InferenceState
 
@@ -1552,19 +1553,6 @@ function typeinf_ext(linfo::LambdaInfo)
     if isdefined(linfo, :def)
         # method lambda - infer this specialization via the method cache
         (code, _t, _) = typeinf_edge(linfo.def, linfo.specTypes, svec(), true, true, true, linfo)
-        if code.inferred
-            linfo.inferred = true
-            linfo.inInference = false
-            if linfo !== code
-                linfo.code = code.code
-                linfo.slotnames = code.slotnames
-                linfo.slottypes = code.slottypes
-                linfo.slotflags = code.slotflags
-                linfo.ssavaluetypes = code.ssavaluetypes
-                linfo.rettype = code.rettype
-                linfo.pure = code.pure
-            end
-        end
     else
         # toplevel lambda - infer directly
         frame = InferenceState(linfo, linfo.specTypes, svec(), true)
@@ -1944,20 +1932,6 @@ function finish(me::InferenceState)
         me.linfo.code = compressedtree
     end
     me.linfo.rettype = me.bestguess
-
-    if me.destination !== me.linfo
-        out = me.destination
-        out.inferred = true
-        out.inInference = false
-        out.code = me.linfo.code
-        out.slotnames = me.linfo.slotnames
-        out.slottypes = me.linfo.slottypes
-        out.slotflags = me.linfo.slotflags
-        out.ssavaluetypes = me.linfo.ssavaluetypes
-        out.rettype = me.linfo.rettype
-        out.pure = me.linfo.pure
-        out.inlineable = me.linfo.inlineable
-    end
 
     # lazy-delete the item from active for several reasons:
     # efficiency, correctness, and recursion-safety
