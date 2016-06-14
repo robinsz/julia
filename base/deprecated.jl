@@ -731,6 +731,9 @@ function first(::Colon)
     1
 end
 
+@deprecate_binding Serializer Serialization
+@deprecate_binding SerializationState BasicSerializer
+
 # During the 0.5 development cycle, do not add any deprecations below this line
 # To be deprecated in 0.6
 

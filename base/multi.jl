@@ -244,7 +244,7 @@ function send_msg_(w::Worker, msg, now::Bool)
     io = w.w_stream
     lock(io.lock)
     try
-        reset(w.w_serializer)
+        reset_state(w.w_serializer)
         serialize(w.w_serializer, msg)  # io is wrapped in w_serializer
 
         if !now && w.gcflag
@@ -997,7 +997,7 @@ function message_handler_loop(r_stream::IO, w_stream::IO, incoming::Bool)
         version = process_hdr(r_stream, incoming)
         serializer = ClusterSerializer(r_stream)
         while true
-            reset(serializer)
+            reset_state(serializer)
             msg = deserialize(serializer)
             # println("got msg: ", msg)
             handle_msg(msg, r_stream, w_stream, version)

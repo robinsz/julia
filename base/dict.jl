@@ -398,14 +398,14 @@ get!(o::ObjectIdDict, key, default) = (o[key] = get(o, key, default))
 abstract AbstractSerializer
 
 # Serializer type needed as soon as ObjectIdDict is available
-type Serializer{I<:IO} <: AbstractSerializer
+type BasicSerializer{I<:IO} <: AbstractSerializer
     io::I
     counter::Int
     table::ObjectIdDict
-    Serializer(io::I) = new(io, 0, ObjectIdDict())
+    BasicSerializer(io::I) = new(io, 0, ObjectIdDict())
 end
 
-Serializer(io::IO) = Serializer{typeof(io)}(io)
+BasicSerializer(io::IO) = BasicSerializer{typeof(io)}(io)
 
 # dict
 

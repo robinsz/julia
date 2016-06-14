@@ -2,10 +2,10 @@
 
 module Serialization
 
-import Base: GMP, Bottom, svec, unsafe_convert, uncompressed_ast, reset
+import Base: GMP, Bottom, svec, unsafe_convert, uncompressed_ast
 using Base: ViewIndex, index_lengths
 
-export serialize, deserialize
+export serialize, deserialize, reset_state
 
 ## serializing values ##
 
@@ -102,7 +102,7 @@ function serialize_cycle(s::AbstractSerializer, x)
     return false
 end
 
-function reset(s::AbstractSerializer)
+function reset_state(s::AbstractSerializer)
     s.counter = 0
     s.table = ObjectIdDict()
     s
@@ -518,11 +518,11 @@ function serialize_any(s::AbstractSerializer, x::ANY)
     end
 end
 
-serialize(s::IO, x) = serialize(Serializer(s), x)
+serialize(s::IO, x) = serialize(BasicSerializer(s), x)
 
 ## deserializing values ##
 
-deserialize(s::IO) = deserialize(Serializer(s))
+deserialize(s::IO) = deserialize(BasicSerializer(s))
 
 function deserialize(s::AbstractSerializer)
     handle_deserialize(s, Int32(read(s.io, UInt8)::UInt8))
@@ -738,7 +738,6 @@ function deserialize(s::AbstractSerializer, ::Type{TypeName})
     number = read(s.io, UInt64)
     name = deserialize(s)
     mod = deserialize(s)
-    record_new = nothing
     if haskey(known_object_data, number)
         tn = known_object_data[number]::TypeName
         name = tn.name

@@ -102,7 +102,7 @@ export
     RoundToZero,
     RoundUp,
     AbstractSerializer,
-    Serializer,
+    BasicSerializer,
     Set,
     SharedArray,
     SharedMatrix,

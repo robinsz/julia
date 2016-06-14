@@ -68,7 +68,3 @@ function serialize(s::ClusterSerializer, t::TypeName)
 #        println(t.module, ":", t.name, ", id:", identifier, " NOT sent")
     end
 end
-
-# TODO
-# Handle wrkr1 -> wrkr2, wrkr1 -> wrkr3 and wrkr2 -> wrkr3
-# Handle other modules
